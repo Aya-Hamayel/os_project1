@@ -1,0 +1,324 @@
+#include <ctype.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_WORD_LENGTH 50
+#define MAX_WORDS 17005207
+
+struct timeval start_time, end_time;
+
+//____________________________________________________________________________________________________
+
+typedef struct
+{
+    char word[MAX_WORD_LENGTH];
+    int count;
+} WordCount;
+
+WordCount *shared_wordCounts;
+int *shared_totalWords;
+sem_t *semaphore;
+
+//____________________________________________________________________________________________________
+
+char* read_file(const char *filename, int *file_size);
+void parallel_process(const char *text, int text_size, int num_processes);
+void process_chunk(const char *chunk, int chunk_size);
+void add_word(const char *word);
+void merge(WordCount arr[], int left, int mid, int right);
+void merge_sort(WordCount arr[], int left, int right);
+void print_top_10();
+
+//____________________________________________________________________________________________________
+
+int main()
+{
+    // تخصيص الذاكرة المشتركة
+    shared_wordCounts = mmap(NULL, MAX_WORDS * sizeof(WordCount), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    shared_totalWords = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    semaphore = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    if (shared_wordCounts == MAP_FAILED || shared_totalWords == MAP_FAILED || semaphore == MAP_FAILED)
+    {
+        perror("Memory mapping failed");
+        exit(1);
+    }
+
+    *shared_totalWords = 0;
+
+    if (sem_init(semaphore, 1, 1) != 0)
+    {
+        perror("Semaphore initialization failed");
+        exit(1);
+    }
+
+    const char *filename = "Document.txt";
+
+    // قراءة الملف
+    int file_size = 0;
+    char *text = read_file(filename, &file_size);
+
+    int num_processes[] = {2, 4, 6, 8};
+
+    for (int i = 0; i < 4; i++)
+    {
+        printf("\nRunning with %d processes:\n", num_processes[i]);
+
+
+        memset(shared_wordCounts, 0, MAX_WORDS * sizeof(WordCount));
+        *shared_totalWords = 0;
+
+        gettimeofday(&start_time, NULL);
+
+
+        parallel_process(text, file_size, num_processes[i]);
+
+        gettimeofday(&end_time, NULL);
+
+        print_top_10();
+
+
+        double time_taken = (end_time.tv_sec - start_time.tv_sec) +
+                            (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
+        int minutes = (int)time_taken / 60;
+        double seconds = time_taken - (minutes * 60);
+
+        printf("Time taken with %d processes: %.4f seconds (or %d minutes and %.2f seconds)\n",
+               num_processes[i], time_taken, minutes, seconds);
+    }
+
+    // تحرير الموارد
+    free(text);
+    munmap(shared_wordCounts, MAX_WORDS * sizeof(WordCount));
+    munmap(shared_totalWords, sizeof(int));
+    sem_destroy(semaphore);
+    munmap(semaphore, sizeof(sem_t));
+
+    return 0;
+}
+
+//____________________________________________________________________________________________________
+
+// دالة لإضافة كلمة أو تحديثها في الذاكرة المشتركة
+void add_word(const char *word)
+{
+    for (int i = 0; i < *shared_totalWords; i++)
+    {
+        if (strcmp(shared_wordCounts[i].word, word) == 0)
+        {
+            sem_wait(semaphore);
+            shared_wordCounts[i].count++;
+            sem_post(semaphore);
+            return;
+        }
+    }
+
+    sem_wait(semaphore);
+
+    for (int i = 0; i < *shared_totalWords; i++)
+    {
+        if (strcmp(shared_wordCounts[i].word, word) == 0)
+        {
+            shared_wordCounts[i].count++;
+            sem_post(semaphore);
+            return;
+        }
+    }
+
+    if (*shared_totalWords < MAX_WORDS)
+    {
+        strcpy(shared_wordCounts[*shared_totalWords].word, word);
+        shared_wordCounts[*shared_totalWords].count = 1;
+        (*shared_totalWords)++;
+    }
+    else
+    {
+        printf("Reached maximum word limit\n");
+    }
+
+    sem_post(semaphore);
+}
+
+//____________________________________________________________________________________________________
+
+// معالجة جزء من النص
+void process_chunk(const char *chunk, int chunk_size)
+{
+    char word[MAX_WORD_LENGTH];
+    int index = 0;
+
+    for (int i = 0; i < chunk_size; i++)
+    {
+        if (isalnum(chunk[i]))
+        {
+            if (index < MAX_WORD_LENGTH - 1)
+                word[index++] = tolower(chunk[i]);
+        }
+        else if (index > 0)
+        {
+            word[index] = '\0';
+            add_word(word);
+            index = 0;
+        }
+    }
+    if (index > 0)
+    {
+        word[index] = '\0';
+        add_word(word);
+    }
+}
+
+//__________________________________________________________________________________________
+
+// قراءة الملف بالكامل
+char* read_file(const char *filename, int *file_size)
+{
+    FILE *file = fopen(filename, "r");
+    if (!file)
+    {
+        perror("Error opening file");
+        exit(1);
+    }
+
+    fseek(file, 0, SEEK_END);
+    *file_size = ftell(file);
+    rewind(file);
+
+    char *text = malloc(*file_size + 1);
+    if (!text)
+    {
+        perror("Memory allocation failed");
+        fclose(file);
+        exit(1);
+    }
+
+    fread(text, 1, *file_size, file);
+    text[*file_size] = '\0';
+
+    fclose(file);
+    return text;
+}
+
+//______________________________________________________________________________________________________
+
+// دمج جزأين من الكلمات
+void merge(WordCount arr[], int left, int mid, int right)
+{
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+
+    WordCount *L = malloc(n1 * sizeof(WordCount));
+    WordCount *R = malloc(n2 * sizeof(WordCount));
+
+    if (L == NULL || R == NULL)
+    {
+        perror("Memory allocation failed in merge");
+        exit(1);
+    }
+
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[left + i];
+    for (int i = 0; i < n2; i++)
+        R[i] = arr[mid + 1 + i];
+
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2)
+    {
+        if (L[i].count >= R[j].count)
+        {
+            arr[k] = L[i];
+            i++;
+        }
+        else
+        {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    while (i < n1)
+    {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+
+    while (j < n2)
+    {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+
+    free(L);
+    free(R);
+}
+
+// الفرز الدمجي
+void merge_sort(WordCount arr[], int left, int right)
+{
+    if (left < right)
+    {
+        int mid = left + (right - left) / 2;
+        merge_sort(arr, left, mid);
+        merge_sort(arr, mid + 1, right);
+        merge(arr, left, mid, right);
+    }
+}
+
+//______________________________________________________________________________________________________
+
+
+void parallel_process(const char *text, int text_size, int num_processes)
+{
+    int chunk_size = text_size / num_processes;
+    pid_t pids[num_processes];
+
+    for (int i = 0; i < num_processes; i++)
+    {
+        pids[i] = fork();
+        if (pids[i] == 0)
+        {
+            char *chunk = (char *)text + i * chunk_size;
+            int current_chunk_size = chunk_size;
+            if (i == num_processes - 1)
+            {
+                current_chunk_size = text_size - i * chunk_size;
+            }
+
+            process_chunk(chunk, current_chunk_size);
+            exit(0);
+        }
+    }
+
+    for (int i = 0; i < num_processes; i++)
+    {
+        waitpid(pids[i], NULL, 0);
+    }
+}
+
+//______________________________________________________________________________________________________
+
+void print_top_10()
+{
+    if (*shared_totalWords == 0)
+    {
+        printf("No words to display.\n");
+        return;
+    }
+
+    merge_sort(shared_wordCounts, 0, *shared_totalWords - 1);
+
+    int limit = (*shared_totalWords < 10) ? *shared_totalWords : 10;
+    for (int i = 0; i < limit; i++)
+    {
+        printf("%s: %d\n", shared_wordCounts[i].word, shared_wordCounts[i].count);
+    }
+}

@@ -1,0 +1,176 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <sys/time.h>
+#define MAX_WORD_LENGTH 50
+#define MAX_WORDS 17005207
+
+
+
+
+struct timeval start_time, end_time;
+
+
+typedef struct
+{
+    char word[MAX_WORD_LENGTH];
+    int count;
+} WordCount;
+
+
+WordCount wordCounts[MAX_WORDS];
+int totalWords = 0;
+
+//______________________________________________________________________________
+void print_top_10();
+void merge_sort(WordCount arr[], int left, int right);
+void merge(WordCount arr[], int left, int mid, int right);
+void read_file(const char* filename);
+void add_word(const char* word);
+//_______________________________________________________________________________
+
+int main()
+{
+    gettimeofday(&start_time, NULL);
+
+    const char* filename = "Document.txt";
+    read_file(filename);
+    merge_sort(wordCounts, 0, totalWords - 1);
+    print_top_10();
+
+    gettimeofday(&end_time, NULL);
+
+    double time_taken = (end_time.tv_sec - start_time.tv_sec) +
+                        (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
+
+// حساب الوقت بالدقائق والثواني
+    int minutes = (int)time_taken / 60;
+    double seconds = time_taken - (minutes * 60);
+
+    printf("Time taken  %.4f seconds (or %d minutes and %.2f seconds)\n", time_taken, minutes, seconds);
+
+    return 0;
+}
+
+//_____________________________________________________________________________
+
+void add_word(const char* word)
+{
+    for (int i = 0; i < totalWords; i++)
+    {
+        if (strcmp(wordCounts[i].word, word) == 0)
+        {
+            wordCounts[i].count++;
+            return;
+        }
+    }
+
+    if (totalWords < MAX_WORDS)
+    {
+        strcpy(wordCounts[totalWords].word, word);
+        wordCounts[totalWords].count = 1;
+        totalWords++;
+    }
+    else
+    {
+        printf("Reached maximum word limit\n");
+    }
+}
+
+
+
+void read_file(const char* filename)
+{
+    FILE *file = fopen(filename, "r");
+    if (!file)
+    {
+        perror("Error opening file");
+        exit(1);
+    }
+
+    char word[MAX_WORD_LENGTH];
+    while (fscanf(file, "%s", word) != EOF)
+    {
+        for (int i = 0; word[i] != '\0'; i++)
+        {
+            if (ispunct(word[i]))
+            {
+                word[i] = '\0';
+                break;
+            }
+            word[i] = tolower(word[i]);
+        }
+        add_word(word);
+    }
+
+    fclose(file);
+}
+
+
+
+void merge(WordCount arr[], int left, int mid, int right)
+{
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+
+    WordCount L[n1], R[n2];
+
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[left + i];
+    for (int i = 0; i < n2; i++)
+        R[i] = arr[mid + 1 + i];
+
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2)
+    {
+        if (L[i].count >= R[j].count)
+        {
+            arr[k] = L[i];
+            i++;
+        }
+        else
+        {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    while (i < n1)
+    {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+
+    while (j < n2)
+    {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+}
+
+void merge_sort(WordCount arr[], int left, int right)
+{
+    if (left < right)
+    {
+        int mid = left + (right - left) / 2;
+        merge_sort(arr, left, mid);
+        merge_sort(arr, mid + 1, right);
+        merge(arr, left, mid, right);
+    }
+}
+
+
+void print_top_10()
+{
+    int limit = totalWords < 10 ? totalWords : 10;
+    for (int i = 0; i < limit; i++)
+    {
+        printf("%s: %d\n", wordCounts[i].word, wordCounts[i].count);
+    }
+}
+
+

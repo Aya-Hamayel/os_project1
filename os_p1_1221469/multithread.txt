@@ -1,0 +1,243 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <pthread.h>
+#include <sys/time.h>
+
+#define MAX_WORD_LENGTH 50
+#define MAX_WORDS 17005207
+
+typedef struct
+{
+    char word[MAX_WORD_LENGTH];
+    int count;
+} WordCount;
+
+WordCount sharedWordCounts[MAX_WORDS];
+int sharedTotalWords = 0;
+pthread_mutex_t lock;
+
+void parallel_thread(const char *text, int text_size, int num_threads);
+char *read_file(const char *filename, int *file_size);
+void *process_chunk(void *arg);
+void add_word(const char *word);
+void print_top_10();
+void mergeSort(WordCount arr[], int left, int right);
+void merge(WordCount arr[], int left, int mid, int right);
+
+int main()
+{
+    const char *filename = "Document.txt";
+
+    // Initialize the mutex lock
+    pthread_mutex_init(&lock, NULL);
+
+    // Read the entire file content
+    int file_size = 0;
+    char *text = read_file(filename, &file_size);
+
+    int num_threads[] = {2, 4, 6, 8};
+
+    for (int i = 0; i < 4; i++)
+    {
+        printf("\nRunning with %d threads:\n", num_threads[i]);
+
+        // Reset shared data
+        sharedTotalWords = 0;
+
+        struct timeval start_time, end_time;
+        gettimeofday(&start_time, NULL);
+
+        parallel_thread(text, file_size, num_threads[i]);
+
+        gettimeofday(&end_time, NULL);
+
+        print_top_10();
+
+        double time_taken = (end_time.tv_sec - start_time.tv_sec) +
+                            (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
+
+        int minutes = (int)time_taken / 60;
+        double seconds = time_taken - (minutes * 60);
+
+        printf("Time taken with %d threads: %.4f seconds (or %d minutes and %.2f seconds)\n",
+               num_threads[i], time_taken, minutes, seconds);
+    }
+
+    pthread_mutex_destroy(&lock);
+    free(text);
+
+    return 0;
+}
+
+void merge(WordCount arr[], int left, int mid, int right)
+{
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+
+    WordCount *L = (WordCount *)malloc(n1 * sizeof(WordCount));
+    WordCount *R = (WordCount *)malloc(n2 * sizeof(WordCount));
+
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[left + i];
+    for (int j = 0; j < n2; j++)
+        R[j] = arr[mid + 1 + j];
+
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2)
+    {
+        if (L[i].count >= R[j].count)
+        {
+            arr[k++] = L[i++];
+        }
+        else
+        {
+            arr[k++] = R[j++];
+        }
+    }
+
+    while (i < n1)
+    {
+        arr[k++] = L[i++];
+    }
+    while (j < n2)
+    {
+        arr[k++] = R[j++];
+    }
+
+    free(L);
+    free(R);
+}
+
+void mergeSort(WordCount arr[], int left, int right)
+{
+    if (left < right)
+    {
+        int mid = left + (right - left) / 2;
+
+        mergeSort(arr, left, mid);
+        mergeSort(arr, mid + 1, right);
+
+        merge(arr, left, mid, right);
+    }
+}
+
+void print_top_10()
+{
+    mergeSort(sharedWordCounts, 0, sharedTotalWords - 1);
+
+    int limit = (sharedTotalWords < 10) ? sharedTotalWords : 10;
+    for (int i = 0; i < limit; i++)
+    {
+        printf("%s: %d\n", sharedWordCounts[i].word, sharedWordCounts[i].count);
+    }
+}
+
+void add_word(const char *word)
+{
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < sharedTotalWords; i++)
+    {
+        if (strcmp(sharedWordCounts[i].word, word) == 0)
+        {
+            sharedWordCounts[i].count++;
+            pthread_mutex_unlock(&lock);
+            return;
+        }
+    }
+
+    if (sharedTotalWords < MAX_WORDS)
+    {
+        strcpy(sharedWordCounts[sharedTotalWords].word, word);
+        sharedWordCounts[sharedTotalWords].count = 1;
+        sharedTotalWords++;
+    }
+    pthread_mutex_unlock(&lock);
+}
+
+void *process_chunk(void *arg)
+{
+    char *text = (char *)arg;
+    int index = 0;
+    char word[MAX_WORD_LENGTH];
+
+    while (*text)
+    {
+        if (isalnum(*text))
+        {
+            word[index++] = tolower(*text);
+        }
+        else if (index > 0)
+        {
+            word[index] = '\0';
+            add_word(word);
+            index = 0;
+        }
+        text++;
+    }
+
+    // If there is a word left at the end
+    if (index > 0)
+    {
+        word[index] = '\0';
+        add_word(word);
+    }
+
+    free(arg);  // Free the allocated memory for chunk
+    return NULL;
+}
+
+void parallel_thread(const char *text, int text_size, int num_threads)
+{
+    pthread_t threads[num_threads];
+    int chunk_size = text_size / num_threads;
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        int start = i * chunk_size;
+        int end = (i == num_threads - 1) ? text_size : start + chunk_size;
+
+        // Create a copy of the chunk to be processed by the thread
+        char *chunk = strndup(&text[start], end - start);
+        if (pthread_create(&threads[i], NULL, process_chunk, chunk) != 0)
+        {
+            perror("Error creating thread");
+            exit(1);
+        }
+    }
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        pthread_join(threads[i], NULL);
+    }
+}
+
+char *read_file(const char *filename, int *file_size)
+{
+    FILE *file = fopen(filename, "r");
+    if (!file)
+    {
+        perror("Error opening file");
+        exit(1);
+    }
+
+    fseek(file, 0, SEEK_END);
+    *file_size = ftell(file);
+    rewind(file);
+
+    char *text = (char *)malloc(*file_size + 1);
+    if (!text)
+    {
+        perror("Memory allocation failed");
+        fclose(file);
+        exit(1);
+    }
+
+    fread(text, 1, *file_size, file);
+    text[*file_size] = '\0'; // Null terminate the string
+
+    fclose(file);
+    return text;
+}
+
